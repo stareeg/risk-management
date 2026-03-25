@@ -1,6 +1,6 @@
 # Управление портфелем: эффективные портфели на российских акциях
 
-Применяем теорию Марковица на реальных данных 30 российских акций с Московской биржи за 2015--2025 годы: строим границы эффективных портфелей при различных ограничениях, считаем бета-коэффициенты по рыночной модели, сравниваем три подхода к оценке ковариационной матрицы (историческая, на основе historical beta, на основе adjusted beta).
+Студенческий проект по курсу "Управление портфелем" (магистратура). Применяем теорию Марковица на реальных данных 30 российских акций с Московской биржи за 2015--2025 годы: строим границы эффективных портфелей при различных ограничениях, считаем бета-коэффициенты по рыночной модели, сравниваем три подхода к оценке ковариационной матрицы (историческая, на основе historical beta, на основе adjusted beta).
 
 Задание содержит 25 задач. Выполнены задачи 1--15 (включая бонусные). Остаются задачи 16--25, инструкции к ним подробно описаны ниже.
 
@@ -573,20 +573,45 @@ data/
   raw/
     risk_free_rate.parquet            # ключевая ставка ЦБ РФ (2015-2025)
   processed/
+    # --- исходные данные ---
+    prices_adjusted.parquet           # цены закрытия 30 акций, скорректированные на сплиты
     returns_daily.parquet             # простые дневные доходности (2611 x 30)
     benchmark_returns.parquet         # дневные доходности IMOEX
-    selected_mu.parquet               # ожидаемые доходности mu (rolling 252d)
+
+    # --- выбранное окно (задача 4): rolling 252d, конец 2025-12-30 ---
+    selected_mu.parquet               # вектор ожидаемых доходностей mu (30 акций)
     selected_cov.parquet              # историческая ковариационная матрица 30x30
     selected_rf.parquet               # безрисковая ставка (rf = 16%)
-    beta_historical.parquet           # historical beta + sigma_epsilon (OLS)
-    beta_adjusted.parquet             # adjusted beta (Блюм: 2/3*beta + 1/3)
-    beta_residuals.parquet            # остатки OLS (252 x 30)
-    beta_cov_matrix.parquet           # Sigma_beta (market model, 30x30)
-    ef_beta_comparison_table.parquet  # таблица сравнения hist vs beta
-    rolling_252d_means.parquet        # скользящие средние доходности (для динамики)
+
+    # --- EF на исторической Sigma (задачи 5-8): 4 режима ограничений ---
+    ef_unrestricted.parquet           # EF без ограничений (200 точек)
+    ef_short_25.parquet               # EF short <= 25% (200 точек)
+    ef_long_only.parquet              # EF long only (200 точек)
+    ef_min_2pct.parquet               # EF min 2% в каждую акцию (200 точек)
+    ef_portfolios.pkl                 # сводка: GMVP, tangency, EW для всех 4 режимов
+    ef_unrestricted_weights.pkl       # веса 200 портфелей на unrestricted frontier
+    ef_long_only_weights.pkl          # веса портфелей на long-only frontier
+
+    # --- динамика EF (задачи 9-10): серии фронтиров по годам ---
+    rolling_252d_means.parquet        # скользящие средние доходности (для пересчёта mu)
     rolling_252d_covs.pkl             # скользящие ковариационные матрицы (17 MB)
-    ef_dynamics_rolling_252d.pkl      # динамика EF (historical Sigma)
-    ef_dynamics_beta_252d.pkl         # динамика EF (beta-based Sigma)
+    ef_dynamics_rolling_252d.pkl      # 10 фронтиров, rolling 252d, year-end
+    ef_dynamics_expanding.pkl         # 11 фронтиров, расширяющееся окно
+
+    # --- бета-коэффициенты (задачи 11-12) ---
+    beta_historical.parquet           # historical beta + sigma_epsilon (OLS, 30 акций)
+    beta_adjusted.parquet             # adjusted beta (Блюм: 2/3*beta + 1/3)
+    beta_residuals.parquet            # остатки OLS-регрессий (252 x 30)
+    beta_dynamics_rolling_252d.pkl    # бета по 10 контрольным датам (для задачи 18)
+
+    # --- EF на market model Sigma_beta (задачи 13-15) ---
+    beta_cov_matrix.parquet           # Sigma_beta = beta*beta'*sigma2_m + diag(sigma2_eps)
+    ef_beta_unrestricted.parquet      # EF unrestricted на Sigma_beta (200 точек)
+    ef_beta_long_only.parquet         # EF long-only на Sigma_beta
+    ef_beta_weights.pkl               # веса портфелей на beta-based frontier
+    ef_beta_comparison_table.parquet  # таблица: GMVP/tangency/EW для hist vs beta
+    ef_dynamics_beta_252d.pkl         # 10 фронтиров на beta, year-end
+
   meta/
     instruments.csv                   # справочник: тикер, компания, сектор
   export/
