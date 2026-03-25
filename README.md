@@ -198,315 +198,435 @@ Market model даёт чуть меньший GMVP risk за счёт фильт
 
 ## Инструкция для задач 16--25
 
-Ниже подробные указания для каждой оставшейся задачи: что нужно сделать, какие данные использовать, какой код писать, и какие проверки провести.
+Ниже подробные указания для каждой оставшейся задачи. Для каждой даём: полную формулировку из задания, входные файлы, код или подсказки, и ожидаемые выводы.
+
+Весь код для задач 16-25 уже заготовлен в `portfolio_analysis.ipynb` (секции 7-12). Функции оптимизации встроены прямо в ноутбук, внешние модули не нужны (но если удобнее -- `scripts/step3_optimizer.py` и `scripts/step4_dynamics.py` тоже в репозитории).
+
+---
 
 ### Задача 16: Ковариационная матрица на adjusted beta
 
-Формула та же, что для historical beta (задача 13), но вместо beta_hist используем beta_adj:
+**Формулировка из задания:** *Рассчитать на выбранном в п. 12 историческом окне для отобранных акций ковариационную матрицу на основе скорректированных beta (adjusted betas).*
 
+**Суть:** берём ту же формулу market model, что в задаче 13, но заменяем historical beta на adjusted beta (Блюм: beta_adj = 2/3 * beta_hist + 1/3). Остатки OLS и дисперсия рынка остаются теми же -- adjusted beta корректирует только наклон регрессии.
+
+**Входные файлы:**
+| Файл | Что берём |
+|------|-----------|
+| `data/processed/beta_adjusted.parquet` | beta_adj (30 значений, колонка `beta_adjusted`) |
+| `data/processed/beta_historical.parquet` | sigma_epsilon (30 значений, колонка `sigma_epsilon`) -- дневное std остатков |
+| `data/processed/benchmark_returns.parquet` | доходности IMOEX для расчёта sigma2_m |
+| `data/processed/beta_residuals.parquet` | индекс (252 даты) -- для выравнивания окна с benchmark |
+
+**Формула:**
 ```
-Sigma_adj = beta_adj * beta_adj' * sigma2_m + diag(sigma2_eps)
+Sigma_adj = beta_adj * beta_adj' * sigma2_m_annual + diag(sigma2_eps_annual)
 ```
+где sigma2_m_annual = var(r_m, ddof=1) * 252, sigma2_eps_annual = sigma_eps^2 * 252.
 
-Где:
-- `beta_adj` -- из `data/processed/beta_adjusted.parquet`, колонка `beta_adjusted`
-- `sigma2_m` -- дисперсия IMOEX за 252 дня (та же, что в задаче 13)
-- `sigma2_eps` -- дисперсии остатков OLS (из `data/processed/beta_historical.parquet`, колонка `sigma_epsilon`)
-
-Важный момент: `sigma2_eps` берём от historical regression, не пересчитываем. Adjusted beta -- это только коррекция наклона (сжатие к 1), остатки OLS не меняются.
-
-Пример кода:
-
+**Код:**
 ```python
-import numpy as np
-import pandas as pd
-
 beta_adj_df = pd.read_parquet('data/processed/beta_adjusted.parquet')
 beta_hist_df = pd.read_parquet('data/processed/beta_historical.parquet')
 bench = pd.read_parquet('data/processed/benchmark_returns.parquet')
 residuals = pd.read_parquet('data/processed/beta_residuals.parquet')
 
-beta_adj = beta_adj_df['beta_adjusted'].values  # (30,)
-sigma_eps = beta_hist_df['sigma_epsilon'].values  # (30,), daily std
+beta_adj = beta_adj_df['beta_adjusted'].values          # (30,)
+sigma_eps = beta_hist_df['sigma_epsilon'].values         # (30,), daily std
 
-r_m = bench.loc[residuals.index, 'return_imoex'].values
-sigma2_m = np.var(r_m, ddof=1)  # daily
+r_m = bench.loc[residuals.index, 'return_imoex'].values  # (252,)
+sigma2_m = np.var(r_m, ddof=1)                            # daily
 
-# аннуализация
 sigma2_m_annual = sigma2_m * 252
 sigma2_eps_annual = sigma_eps ** 2 * 252
 
-# ковариационная матрица
 Sigma_adj = np.outer(beta_adj, beta_adj) * sigma2_m_annual + np.diag(sigma2_eps_annual)
 ```
 
-Проверки: матрица symmetric, PSD, condition number, корреляции в (0, 1).
+**Проверки:** symmetric, PSD (eigenvalues >= 0), condition number, корреляции в (0, 1), все диагональные > 0.
 
-Выходные файлы: `data/processed/beta_adj_cov_matrix.parquet` (аналог `beta_cov_matrix.parquet`).
+**Ожидаемые выводы:**
+- Sigma_adj будет ближе к Sigma_beta (historical beta), чем к исторической Sigma -- разница только в значениях beta
+- Adjusted beta сжаты к 1.0, поэтому внедиагональные элементы Sigma_adj более однородные (корреляции ближе друг к другу)
+- Condition number Sigma_adj должен быть сопоставим с Sigma_beta (~159), возможно чуть ниже за счёт более однородных beta
+- Все корреляции > 0 (как и в задаче 13 -- свойство однофакторной модели)
+
+**Выходные файлы:** `data/processed/beta_adj_cov_matrix.parquet`
+
+---
 
 ### Задача 17: EF на Sigma_adj
 
-Строим границу эффективных портфелей с использованием Sigma_adj из задачи 16. Модуль оптимизации уже написан: `scripts/step3_optimizer.py`.
+**Формулировка из задания:** *Построить границу эффективных портфелей на основе полученной в п. 16 ковариационной матрицы.*
 
+**Суть:** строим efficient frontier точно так же, как в задаче 14, но подставляем Sigma_adj вместо Sigma_beta. Вектор ожидаемых доходностей mu тот же (свойство OLS: среднее доходности совпадает с предсказанием модели).
+
+**Входные файлы:**
+| Файл | Что берём |
+|------|-----------|
+| Sigma_adj из задачи 16 | ковариационная матрица 30x30 |
+| `data/processed/selected_mu.parquet` | вектор mu (30 акций, колонка `expected_return`) |
+| `data/processed/selected_rf.parquet` | rf = 16% (колонка `rf_annual`) |
+
+**Код:**
 ```python
-from step3_optimizer import build_efficient_frontier, find_gmvp, find_tangency
-
-mu_df = pd.read_parquet('data/processed/selected_mu.parquet')
-mu = mu_df['expected_return'].values
+mu = pd.read_parquet('data/processed/selected_mu.parquet')['expected_return'].values
 rf = 0.16
 
 # unrestricted
 gmvp = find_gmvp(mu, Sigma_adj, bounds=None)
 mu_max = gmvp['return'] + 2 * (max(mu) - gmvp['return'])
-frontier = build_efficient_frontier(mu, Sigma_adj, rf, n_points=200, bounds=None, mu_max=mu_max)
+frontier_unr = build_efficient_frontier(mu, Sigma_adj, rf, n_points=200, bounds=None, mu_max=mu_max)
 
 # long-only
 gmvp_lo = find_gmvp(mu, Sigma_adj, bounds=[(0, 1)] * 30)
 frontier_lo = build_efficient_frontier(mu, Sigma_adj, rf, n_points=200, bounds=[(0, 1)] * 30, mu_max=max(mu))
 ```
 
-Замечание про unrestricted: `mu_max` задаётся вручную (GMVP + 2 * (max(mu) - GMVP)), иначе optimizer расходится на больших целевых доходностях.
+**Ожидаемые выводы:**
+- GMVP (unrestricted) будет очень близок к GMVP на Sigma_beta, потому что adjusted beta -- это линейная трансформация historical beta, а sigma_eps те же
+- Небольшой сдвиг: adjusted beta ближе к 1 -> все акции «более похожи» на рынок -> диверсификация чуть хуже -> GMVP std может быть чуть выше, чем для historical beta
+- Ожидаемая оценка: GMVP unrestricted return ~ -8...-9%, std ~ 13-14%
+- Sharpe по-прежнему отрицательный (rf=16% > GMVP return)
 
-Выходные файлы: `data/processed/ef_adj_unrestricted.parquet`, `data/processed/ef_adj_long_only.parquet`, веса в pickle.
+**Выходные файлы:** `data/processed/ef_adj_unrestricted.parquet`, `data/processed/ef_adj_long_only.parquet`
+
+---
 
 ### Задача 18* (бонусная): Динамика EF на adjusted beta
 
-Аналог задачи 15. Для каждой из ~10 контрольных дат:
+**Формулировка из задания:** *Построить границу эффективных портфелей для разных исторических окон и продемонстрировать динамику её изменения. Другими словами, выполнить пп. 16-17 не для одного, а для разных окон.*
 
-1. Взять 252 дневных доходности акций и рынка
-2. OLS-регрессии -> beta_hist -> beta_adj = 2/3 * beta_hist + 1/3
-3. sigma2_m и sigma2_eps из той же регрессии
-4. Sigma_adj = beta_adj * beta_adj' * sigma2_m * 252 + diag(sigma2_eps * 252)
-5. Построить EF unrestricted
+**Суть:** повторяем задачу 15, но для adjusted beta. Для каждой из ~10 контрольных дат пересчитываем OLS-регрессии, получаем beta_hist, применяем формулу Блюма, строим Sigma_adj, строим EF.
 
-Контрольные даты можно взять из `ef_dynamics_beta_252d.pkl['dates']` -- те же даты, что в задачах 9, 10, 15.
+**Входные файлы:**
+| Файл | Что берём |
+|------|-----------|
+| `data/processed/returns_daily.parquet` | дневные доходности 30 акций (для OLS в каждом окне) |
+| `data/processed/benchmark_returns.parquet` | доходности IMOEX (для OLS) |
+| `data/processed/rolling_252d_means.parquet` | аннуализированные средние для каждого окна (mu) |
+| `data/raw/risk_free_rate.parquet` | историческая ключевая ставка ЦБ |
+| `data/processed/ef_dynamics_beta_252d.pkl` | только для списка контрольных дат (ключ `dates`) |
 
-За основу кода можно взять `scripts/step6_beta_dynamics.py`, заменив historical beta на adjusted.
+**Алгоритм для каждой контрольной даты:**
+1. Взять 252 доходности акций и рынка, заканчивающиеся на эту дату
+2. OLS: r_i = alpha + beta_hist * r_m + eps (statsmodels)
+3. beta_adj = 2/3 * beta_hist + 1/3
+4. sigma_eps = std(residuals), sigma2_m = var(r_m, ddof=1)
+5. Sigma_adj = beta_adj * beta_adj' * sigma2_m * 252 + diag(sigma_eps^2 * 252)
+6. mu из rolling_252d_means для этой даты (уже аннуализированные)
+7. rf -- историческая ключевая ставка на эту дату
+8. build_efficient_frontier(mu, Sigma_adj, rf, n_points=100, bounds=None)
 
-Выходные файлы: `data/processed/ef_dynamics_adj_beta_252d.pkl`.
+**Контрольные даты** (10 штук, year-end): 2016-12-30, 2017-12-29, ..., 2025-12-30. Можно взять из `ef_dynamics_beta_252d.pkl['dates']`.
+
+**Ожидаемые выводы:**
+- Динамика adjusted-beta EF будет похожа на historical-beta EF, но более сглаженная (beta ближе к 1 -> меньше разброс корреляций между датами)
+- В кризис 2022: исторические beta растут (co-movement), adjusted beta «притягиваются» к 1, сглаживая эффект -- frontier менее волатильная
+- GMVP trajectory для adjusted beta должна быть более стабильной, чем для historical beta (один из ключевых выводов задачи 20)
+
+**Выходные файлы:** `data/processed/ef_dynamics_adj_beta_252d.pkl`
+
+---
 
 ### Задача 19: Сравнение трёх подходов
 
-Наложить три frontier (unrestricted) на одном графике:
+**Формулировка из задания:** *Сравнить на выбранном в п. 12 историческом окне для отобранных акций границы эффективных портфелей, рассчитанные тремя различными способами: на основе исторических доходностей, исторических и скорректированных beta. Привести экономическую интерпретацию полученных результатов.*
 
-1. **Historical Sigma** -- из `data/processed/ef_unrestricted.parquet`
-2. **Market Model (hist beta)** -- из `data/processed/ef_beta_unrestricted.parquet`
-3. **Market Model (adj beta)** -- результат задачи 17
+**Суть:** это ключевая задача проекта -- нужно наложить три frontier на один график и объяснить различия. Численные данные для двух из трёх подходов уже готовы, третий (adjusted beta) -- результат задач 16-17.
 
-Нужно:
-- График: три кривые в координатах (std, return), общая ось
-- Таблица ключевых портфелей (GMVP, tangency, equal-weight) x 3 метода
-- Аналогичный график и таблица для long-only
+**Входные файлы:**
+| Файл | Метод | Статус |
+|------|-------|--------|
+| `data/processed/ef_unrestricted.parquet` | Historical Sigma | Готово |
+| `data/processed/ef_beta_unrestricted.parquet` | Market Model (historical beta) | Готово |
+| Результат задачи 17 | Market Model (adjusted beta) | Нужно сделать |
+| `data/processed/ef_long_only.parquet` | Historical Sigma, long-only | Готово |
+| `data/processed/ef_beta_long_only.parquet` | Market Model (hist beta), long-only | Готово |
+| Результат задачи 17 | Market Model (adj beta), long-only | Нужно сделать |
+| `data/processed/ef_beta_comparison_table.parquet` | Таблица сравнения hist vs beta (образец формата) | Готово |
 
-Экономическая интерпретация (на что обратить внимание):
-- Historical Sigma: 465 параметров, включает шумовые корреляции, может переподгонять
-- Hist beta Sigma: 61 параметр, все корреляции задаются через рынок, фильтрация шума
-- Adj beta Sigma: то же + beta сжаты к 1 (mean reversion), более стабильная оценка
+**Что нужно построить:**
+1. График: три EF (unrestricted) в координатах (std, return), отметить GMVP и tangency для каждой
+2. То же для long-only
+3. Таблица ключевых портфелей: GMVP (return, std, sharpe) x 3 метода x 2 режима (unrestricted + long-only)
+4. EW portfolio: return одинаковый для всех трёх (свойство OLS!), std различается
 
-Вопросы для обсуждения: какой метод даёт самый низкий GMVP risk? Насколько различаются веса GMVP? Какой метод предпочтительнее для практического использования?
+**Ожидаемые выводы:**
 
-Выходные файлы: `data/processed/ef_comparison_three_methods.parquet`, графики в `temp/`.
+Три подхода к оценке Sigma:
+- **Historical Sigma** (465 параметров) -- все парные корреляции оцениваются напрямую. Включает шумовые корреляции, но и реальные идиосинкратические связи между акциями (напр. PLZL как hedge).
+- **Hist beta Sigma** (61 параметр) -- все корреляции только через рынок. Фильтрует шум, но игнорирует связи внутри секторов (напр. CHMF-NLMK-MAGN -- все металлурги, коррелированы сильнее, чем через рынок).
+- **Adj beta Sigma** (61 параметр) -- то же, но beta сжаты к 1. Ещё более однородная структура корреляций. Mean reversion beta -- эмпирически оправданная коррекция (beta для extreme stocks возвращаются к среднему).
+
+Границы будут расположены так:
+- Все три frontiers близки друг к другу (mu одинаковый, различия только в Sigma)
+- GMVP risk: скорее всего historical <= hist beta <= adj beta (или наоборот, зависит от данных)
+- Market model даёт более «правильную» оценку out-of-sample (меньше overfitting), но хуже in-sample
+- Для российского рынка 2025 (высокая rf) практическая разница минимальна -- все подходы дают отрицательный Sharpe
+
+---
 
 ### Задача 20* (бонусная): Сравнение для разных окон
 
-Три серии фронтиров по годам:
-- Historical: `data/processed/ef_dynamics_rolling_252d.pkl`
-- Hist beta: `data/processed/ef_dynamics_beta_252d.pkl`
-- Adj beta: результат задачи 18
+**Формулировка из задания:** *Выполнить п. 19 для разных окон. Привести экономическую интерпретацию полученных результатов.*
 
-Построить:
-- GMVP trajectory (GMVP risk vs time) для трёх методов на одном графике
-- GMVP return trajectory
-- По желанию -- анимация или серия фронтиров для одной выбранной даты
+**Суть:** для каждой из ~10 контрольных дат (2016-2025) сравниваем три подхода. Основная визуализация -- GMVP trajectory (как GMVP risk меняется во времени для каждого метода).
 
-Экономическая интерпретация: какой метод даёт наиболее стабильные оценки GMVP? Как ведут себя три подхода в кризисные периоды (2020, 2022)?
+**Входные файлы:**
+| Файл | Метод | Статус |
+|------|-------|--------|
+| `data/processed/ef_dynamics_rolling_252d.pkl` | Historical Sigma | Готово |
+| `data/processed/ef_dynamics_beta_252d.pkl` | Hist beta | Готово |
+| Результат задачи 18 | Adj beta | Нужно сделать |
+
+Из каждого pkl берём `key_portfolios` -> `gmvp` -> `std` и `return` для каждой даты.
+
+**Что построить:**
+1. GMVP std vs time (три линии на одном графике)
+2. GMVP return vs time (три линии)
+3. Таблица: mean и std GMVP risk по 10 датам для каждого метода
+
+**Ожидаемые выводы:**
+- Historical Sigma даёт самый нестабильный GMVP (высокая дисперсия risk от года к году), потому что 465 параметров шумят
+- Market model (hist beta) более стабилен -- 61 параметр, ковариационная матрица структурирована
+- Adjusted beta -- самый стабильный из трёх: beta сжаты к 1, меньше разброс между датами
+- В кризис (2022): historical GMVP risk резко растёт (все корреляции идут к 1), market model растёт меньше, adjusted beta -- ещё меньше
+- Вывод для практики: market model с adjusted beta -- предпочтительный подход для стабильного портфельного управления. Historical Sigma подходит для краткосрочного тактического allocation
+
+---
 
 ### Задача 21* (бонусная): Все задачи со звёздочкой
 
-Задачи 2b, 3, 9b, 10, 15 уже выполнены. Для полного зачёта осталось выполнить задачи 18 и 20.
+**Формулировка из задания:** *Выполнить пункты с (\*), которая встречается в пп. 2-20.*
+
+**Статус:** задачи 2b, 3, 9b, 10, 15 уже выполнены. Для полного зачёта осталось выполнить задачи 18 и 20 (см. выше).
+
+---
 
 ### Задача 22** (бонусная): Black's two-fund theorem
 
-Black (1972): любой портфель на MVF (minimum variance frontier) -- линейная комбинация двух других портфелей на этой границе, если short sales разрешены.
+**Формулировка из задания:** *Проверить Black's (1972) two-fund theorem, согласно которой все портфели на границе портфелей с минимальной дисперсией являются линейной комбинацией любых двух других портфелей на этой границе при условии, что короткие продажи разрешены.*
 
-Как проверить:
-1. Взять два произвольных портфеля P1 и P2 с frontier из `ef_unrestricted.parquet` (например, GMVP и tangency)
-2. Для третьего портфеля P3 с frontier найти alpha такое, что w3 = alpha * w1 + (1 - alpha) * w2
-3. Проверить, что alpha * w1 + (1 - alpha) * w2 совпадает с w3 по весам (с точностью до optimizer)
-4. Повторить для нескольких P3
+**Суть:** математически строгое свойство MVF (minimum variance frontier) для unrestricted case. Берём два «опорных» портфеля -- GMVP и tangency -- и показываем, что любой третий портфель на frontier можно точно выразить через них.
 
-Веса портфелей: `data/processed/ef_unrestricted_weights.pkl`.
+**Входные файлы:**
+| Файл | Что берём |
+|------|-----------|
+| `data/processed/ef_unrestricted.parquet` | frontier (200 точек: target_return, portfolio_return, portfolio_std) |
+| `data/processed/selected_mu.parquet` | mu (для пересчёта return/std из весов) |
+| `data/processed/selected_cov.parquet` | Sigma (для пересчёта return/std из весов) |
 
-Ожидаемый результат: отклонение весов < 1e-4 для всех точек на frontier.
+Веса всех 200 портфелей хранятся в `ef_unrestricted_weights.pkl` -> `frontier_weights` (200, 30). GMVP: ключ `gmvp` -> `weights`, tangency: ключ `tangency` -> `weights`. Но этого файла нет в репозитории -- пересчитайте GMVP и tangency из `selected_mu` + `selected_cov` функциями `find_gmvp` и `find_tangency` из ноутбука.
+
+**Алгоритм:**
+```python
+w1 = find_gmvp(mu, Sigma)['weights']              # P1 = GMVP
+w2 = find_tangency(mu, Sigma, rf)['weights']       # P2 = Tangency
+
+# для каждого портфеля P3 на frontier подбираем alpha:
+# w3 = alpha * w1 + (1 - alpha) * w2
+# => alpha = (w3 - w2) / (w1 - w2), по любой компоненте
+# или через least squares: alpha = argmin || w3 - alpha*w1 - (1-alpha)*w2 ||
+
+for i, w3 in enumerate(frontier_weights):
+    # alpha через return:
+    r1 = w1 @ mu; r2 = w2 @ mu; r3 = w3 @ mu
+    if abs(r1 - r2) > 1e-10:
+        alpha = (r3 - r2) / (r1 - r2)
+        w_reconstructed = alpha * w1 + (1 - alpha) * w2
+        error = np.max(np.abs(w3 - w_reconstructed))
+```
+
+**Ожидаемые выводы:**
+- Для unrestricted case: ошибка реконструкции < 1e-3 для всех 200 точек (ограничена только точностью optimizer)
+- Теорема подтверждается: MVF -- линейное подпространство в пространстве весов
+- Для long-only: теорема НЕ выполняется (ограничения нарушают линейность -- покажите это для сравнения)
+- Практический смысл: инвестору достаточно двух ETF (GMVP-like и aggressive) для любой позиции на frontier
+
+---
 
 ### Задача 23*** (бонусная): Monte Carlo frontier
 
-1. Сгенерировать N = 10 000 случайных портфелей (random seed = 42):
-   - Веса: np.random.dirichlet(np.ones(30)) -- равномерные на симплексе, sum = 1, все >= 0
-2. Для каждого портфеля рассчитать (mu, sigma) по тем же mu и Sigma, что в задаче 4
-3. Scatter plot: (std, return), 10 000 точек
-4. Наложить аналитическую EF long-only из `ef_long_only.parquet`
-5. Найти Monte Carlo GMVP (точка с min std) и сравнить с аналитическим
+**Формулировка из задания:** *Рассчитать границу эффективных портфелей (для отобранных акций) с помощью метода статистических испытаний (Монте-Карло).*
 
-Ожидаемый результат: облако точек, аналитическая EF -- верхняя граница облака. Monte Carlo GMVP хуже аналитического (Monte Carlo не ищет оптимум, а семплирует).
+**Суть:** вместо аналитической оптимизации генерируем тысячи случайных портфелей и смотрим, как они заполняют пространство (risk, return). Аналитическая EF -- верхняя граница этого облака.
+
+**Входные файлы:**
+| Файл | Что берём |
+|------|-----------|
+| `data/processed/selected_mu.parquet` | mu (30 акций) |
+| `data/processed/selected_cov.parquet` | Sigma (30x30) |
+| `data/processed/ef_long_only.parquet` | аналитическая EF long-only (для наложения) |
+
+**Код:**
+```python
+np.random.seed(42)
+n_simulations = 10000
+
+# случайные веса на симплексе (long-only, sum=1)
+mc_weights = np.random.dirichlet(np.ones(30), size=n_simulations)
+
+mc_returns = mc_weights @ mu
+mc_stds = np.array([np.sqrt(w @ Sigma @ w) for w in mc_weights])
+
+# scatter plot
+plt.scatter(mc_stds, mc_returns, s=1, alpha=0.3, label='Monte Carlo (10000)')
+plt.plot(ef_lo['portfolio_std'], ef_lo['portfolio_return'], 'r-', lw=2, label='Analytical EF')
+```
+
+**Ожидаемые выводы:**
+- Облако точек формирует характерную «пулю» (bullet shape) в координатах (std, return)
+- Аналитическая EF long-only -- это именно верхняя граница облака (efficient set)
+- Нижняя граница облака -- «anti-efficient» frontier (максимальный risk для данного return)
+- Monte Carlo GMVP (точка с min std среди 10000) хуже аналитического GMVP: ~18-20% vs 17.4% -- потому что случайный поиск не находит точный оптимум
+- Чем больше N, тем ближе MC-граница к аналитической, но сходимость медленная (проклятие размерности: 30 акций)
+- Практический вывод: Monte Carlo -- визуально наглядный метод, но для реальной оптимизации бесполезен; аналитический подход строго лучше
+
+---
 
 ### Задача 24**** (бонусная): Maximum risk portfolio
 
-Задача, обратная GMVP: maximize w' * Sigma * w при sum(w) = 1.
+**Формулировка из задания:** *Найти структуру наиболее рискованного портфеля на основе собранных данных (при отсутствии ограничений на короткие продажи и вложения в отдельные акции). Построить границу наиболее рискованных портфелей.*
 
+**Суть:** задача, обратная GMVP. Вместо min w'Sigma*w решаем max w'Sigma*w при sum(w)=1. Без ограничений на short sales портфель может набирать экстремальные веса.
+
+**Входные файлы:** `selected_mu.parquet`, `selected_cov.parquet`
+
+**Код:**
 ```python
 from scipy.optimize import minimize
 
 def neg_variance(w, cov):
     return -w @ cov @ w
 
+# максимально рискованный портфель (unrestricted)
 result = minimize(neg_variance, x0=np.ones(30) / 30, args=(Sigma,),
                   method='SLSQP',
                   constraints={'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+max_risk_weights = result.x
+
+# граница наиболее рискованных портфелей: для каждого target return
+# находим портфель с МАКСИМАЛЬНОЙ дисперсией
+target_returns = np.linspace(min(mu) - 0.5, max(mu) + 0.5, 200)
+max_risk_frontier = []
+for target in target_returns:
+    res = minimize(neg_variance, x0=np.ones(30)/30, args=(Sigma,),
+                   method='SLSQP',
+                   constraints=[
+                       {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
+                       {'type': 'eq', 'fun': lambda w, t=target: w @ mu - t}
+                   ])
+    if res.success:
+        max_risk_frontier.append({'return': target, 'std': np.sqrt(-res.fun)})
 ```
 
-Без ограничений на short sales -- портфель может уходить в экстремальные веса. Строим границу наиболее рискованных портфелей (maximum risk frontier): для каждого целевого return находим портфель с максимальной дисперсией.
-
-### Задача 25***** (бонусная): Implementation shortfall
-
-Встроить транзакционные издержки в оптимизацию:
-
-```
-maximize Sharpe(w) - lambda * TC(w)
-```
-
-где TC(w) учитывает:
-- Bid-ask spread (можно оценить по OHLCV как (high - low) / close)
-- Market impact (пропорционален объёму позиции)
-- lambda -- параметр штрафа
-
-Задача исследовательская: показать, как оптимальный портфель меняется при разных lambda. При lambda = 0 получаем обычный Markowitz, при lambda -> infinity все веса стремятся к текущему портфелю (не торговать).
+**Ожидаемые выводы:**
+- Максимально рискованный портфель будет содержать экстремальные short/long позиции (веса >> 1 и << -1)
+- Maximum risk frontier -- нижняя граница feasible region в координатах (std, return) для unrestricted case
+- Вместе с EF (верхняя граница) они образуют полную MVF (minimum variance frontier) -- «гиперболу» Марковица
+- Std максимально рискованного портфеля может достигать сотен процентов (за счёт leverage через short sales)
+- Для long-only: max risk портфель = 100% в самую волатильную акцию (тривиально)
 
 ---
 
-## Структура файлов
+### Задача 25***** (бонусная): Implementation shortfall
 
-### Данные
+**Формулировка из задания:** *Встроить Implementation Shortfall, рассчитанный для дневных цен закрытия, в оптимизационную задачу (portfolio optimizer).*
+
+**Суть:** Markowitz не учитывает транзакционные издержки. В реальности при ребалансировке портфеля приходится платить спред и двигать рынок. Implementation shortfall -- это разница между «бумажной» доходностью оптимального портфеля и реальной доходностью после учёта всех издержек.
+
+**Входные файлы:** `selected_mu.parquet`, `selected_cov.parquet`, `data/raw/ohlcv_daily.parquet` (для оценки спредов из OHLCV)
+
+**Подход:**
+```
+maximize: w'*mu - rf - lambda * TC(w)  (или maximize Sharpe - lambda * TC)
+```
+где TC(w) = sum_i |w_i - w_i_current| * c_i, c_i -- транзакционные издержки для акции i.
+
+Оценка c_i: bid-ask spread ~ (high - low) / close, усреднённый за окно. Более точно: market impact ~ sqrt(|delta_w_i| / ADV_i), где ADV -- средний дневной объём.
+
+**Ожидаемые выводы:**
+- При lambda=0 получаем обычный Markowitz (нет штрафа за торговлю)
+- При lambda -> inf оптимальный портфель не торгуется (все веса -> текущий портфель)
+- Для промежуточных lambda: портфель «регуляризуется» -- меньше экстремальных весов, меньше turnover
+- TC-adjusted GMVP будет иметь чуть больший risk, но значительно меньший turnover
+- Для российского рынка: спреды голубых фишек (SBER, GAZP) малы (~0.1%), для менее ликвидных акций (MVID, FEES) могут достигать 0.5-1%
+- Практический вывод: учёт TC делает market model (задачи 13-14) более привлекательным -- его веса стабильнее, а значит, turnover ниже
+
+---
+
+## Структура репозитория
+
+В репозитории только файлы, нужные для продолжения работы. Промежуточные скрипты, тесты и временные файлы не включены -- результаты их работы уже в data/.
 
 ```
+portfolio_analysis.ipynb              # основной ноутбук (задачи 1-15 + заготовки 16-25)
+README.md                             # этот файл
+requirements.txt                      # зависимости Python
+
+scripts/
+  step3_optimizer.py                  # модуль оптимизации по Марковицу
+  step4_dynamics.py                   # модуль динамики EF
+
 data/
-  raw/                              # сырые данные с MOEX ISS API
-    ohlcv_daily.parquet             # дневные котировки 30 акций (OHLCV), long format
-    benchmark_daily.parquet         # индекс IMOEX
-    risk_free_rate.parquet          # ключевая ставка ЦБ РФ
-  processed/                        # очищенные и расчётные данные
-    prices_adjusted.parquet         # цены закрытия, скорректированные на сплиты
-    prices_common_wide.parquet      # цены в wide формате (дата x тикер)
-    returns_daily.parquet           # простые дневные доходности (2611 x 30)
-    returns_daily_log.parquet       # лог-доходности
-    benchmark_returns.parquet       # дневные доходности IMOEX
-    selected_mu.parquet             # ожидаемые доходности (252d rolling)
-    selected_cov.parquet            # ковариационная матрица (252d rolling)
-    selected_rf.parquet             # безрисковая ставка
-    rolling_*_covs.pkl              # скользящие ковариационные матрицы (252d, 63d, 21d)
-    expanding_covs.pkl              # расширяющееся окно
-    ewma_*_covs.pkl                 # EWMA (lambda = 0.94, 0.97, 0.99)
-    ef_unrestricted.parquet         # EF без ограничений (200 точек)
-    ef_short_25.parquet             # EF short <= 25%
-    ef_long_only.parquet            # EF long only
-    ef_min_2pct.parquet             # EF min 2%
-    ef_*_weights.pkl                # веса портфелей на EF
-    ef_portfolios.pkl               # сводный файл всех EF
-    ef_dynamics_*.pkl               # динамика EF (rolling, expanding, ewma)
-    beta_historical.parquet         # historical beta (OLS)
-    beta_adjusted.parquet           # adjusted beta (Блюм)
-    beta_residuals.parquet          # остатки OLS-регрессий (252 x 30)
-    beta_regression_stats.parquet   # R2, t-stat, p-value
-    beta_cov_matrix.parquet         # Sigma_beta (market model)
-    beta_cov_decomposition.pkl      # разложение Sigma_beta
-    ef_beta_unrestricted.parquet    # EF на Sigma_beta (unrestricted)
-    ef_beta_long_only.parquet       # EF на Sigma_beta (long only)
-    ef_dynamics_beta_252d.pkl       # динамика EF на beta
-  meta/                             # справочники
-    instruments.csv                 # тикер, компания, сектор
-    trading_calendar.parquet        # торговый календарь MOEX
-    corporate_actions.csv           # сплиты и консолидации
-    anomalous_returns_log.csv       # обнаруженные аномальные доходности
+  raw/
+    risk_free_rate.parquet            # ключевая ставка ЦБ РФ (2015-2025)
+  processed/
+    returns_daily.parquet             # простые дневные доходности (2611 x 30)
+    benchmark_returns.parquet         # дневные доходности IMOEX
+    selected_mu.parquet               # ожидаемые доходности mu (rolling 252d)
+    selected_cov.parquet              # историческая ковариационная матрица 30x30
+    selected_rf.parquet               # безрисковая ставка (rf = 16%)
+    beta_historical.parquet           # historical beta + sigma_epsilon (OLS)
+    beta_adjusted.parquet             # adjusted beta (Блюм: 2/3*beta + 1/3)
+    beta_residuals.parquet            # остатки OLS (252 x 30)
+    beta_cov_matrix.parquet           # Sigma_beta (market model, 30x30)
+    ef_beta_comparison_table.parquet  # таблица сравнения hist vs beta
+    rolling_252d_means.parquet        # скользящие средние доходности (для динамики)
+    rolling_252d_covs.pkl             # скользящие ковариационные матрицы (17 MB)
+    ef_dynamics_rolling_252d.pkl      # динамика EF (historical Sigma)
+    ef_dynamics_beta_252d.pkl         # динамика EF (beta-based Sigma)
+  meta/
+    instruments.csv                   # справочник: тикер, компания, сектор
   export/
-    data_export.xlsx                # все данные в Excel (19 листов, лист spravka)
+    data_export.xlsx                  # все данные в Excel (19 листов)
 ```
 
-### Скрипты
+### Модули-утилиты
 
-| Скрипт | Что делает | Задача |
-|--------|-----------|--------|
-| `scripts/01_download_stocks.py` | Скачивает котировки 30 акций с MOEX ISS API | 1 |
-| `scripts/02_download_benchmark_and_rates.py` | Скачивает IMOEX и ключевую ставку ЦБ | 1 |
-| `scripts/03_corporate_actions.py` | Находит сплиты по аномальным доходностям | 1 |
-| `scripts/04_validate_and_finalize.py` | Валидация, корректировка на сплиты | 1 |
-| `scripts/05_replace_tickers.py` | Замена тикеров с неполной историей | 1 |
-| `scripts/06_replace_lent_with_mvid.py` | Замена LENT на MVID | 1 |
-| `scripts/07_visual_check.py` | Графики цен 30 акций для визуальной проверки | 1 |
-| `scripts/08_finam_crosscheck.py` | Перекрёстная проверка данных с Finam | 1 |
-| `scripts/09_export_excel.py` | Экспорт данных в Excel | 1 |
-| `scripts/10_compute_returns.py` | Расчёт простых и лог-доходностей | 2 |
-| `scripts/step2_rolling_252d.py` | Скользящее окно 252 дня | 2a |
-| `scripts/step2_rolling_other.py` | Скользящие окна 63d и 21d (с shrinkage) | 2a |
-| `scripts/step2_expanding.py` | Расширяющееся окно (11 точек) | 2b* |
-| `scripts/step2_ewma.py` | EWMA ковариация (три lambda) | 3* |
-| `scripts/step2_validate.py` | Валидация всех ковариационных матриц | 2--3 |
-| `scripts/step2_visualize.py` | Визуализации: heatmap, волатильность | 2--3 |
-| `scripts/step2_export_excel.py` | Экспорт доходностей и статистик в Excel | 2--3 |
-| `scripts/step3_select_window.py` | Выбор исторического окна (252d rolling) | 4 |
-| `scripts/step3_optimizer.py` | Модуль оптимизации по Марковицу (импортируется другими скриптами) | 4--8 |
-| `scripts/step3_ef_unrestricted.py` | Граница без ограничений | 5 |
-| `scripts/step3_ef_short_25.py` | Граница с short <= 25% | 6 |
-| `scripts/step3_ef_long_only.py` | Граница long only | 7 |
-| `scripts/step3_ef_min_2pct.py` | Граница с min 2% | 8 |
-| `scripts/step3_compare_plot.py` | Сравнение четырёх границ | 5--8 |
-| `scripts/step4_dynamics.py` | Модуль динамики EF (импортируется другими) | 9--10 |
-| `scripts/step4_rolling.py` | Динамика EF, скользящее окно | 9a |
-| `scripts/step4_expanding.py` | Динамика EF, расширяющееся окно | 9b* |
-| `scripts/step4_ewma.py` | Динамика EF, EWMA | 10* |
-| `scripts/step4_compare.py` | Сравнение и графики динамики | 9--10 |
-| `scripts/step5_benchmark_returns.py` | Расчёт дневных доходностей IMOEX | 11 |
-| `scripts/step5_select_index.py` | Выбор и обоснование индекса для beta | 11 |
-| `scripts/step5_select_window.py` | Выбор окна для beta (252d, OLS) | 12 |
-| `scripts/step5_compute_betas.py` | Расчёт historical и adjusted beta | 11--12 |
-| `scripts/step5_export_excel.py` | Экспорт beta в Excel | 11--12 |
-| `scripts/step6_beta_cov.py` | Ковариационная матрица на historical beta | 13 |
-| `scripts/step6_ef_beta.py` | EF на Sigma_beta | 14 |
-| `scripts/step6_beta_dynamics.py` | Динамика EF на beta | 15* |
-| `scripts/step6_compare_plot.py` | Сравнение EF: historical vs beta | 13--14 |
-| `scripts/step6_export_excel.py` | Экспорт в Excel | 13--15 |
+Два модуля в `scripts/` можно импортировать напрямую. Но все ключевые функции также встроены в секцию 3 ноутбука, так что для работы в Colab внешние модули не обязательны.
 
-### Тесты
+| Модуль | Ключевые функции |
+|--------|------------------|
+| `step3_optimizer.py` | `find_gmvp()`, `find_tangency()`, `build_efficient_frontier()`, `portfolio_return()`, `portfolio_volatility()`, `portfolio_sharpe()` |
+| `step4_dynamics.py` | `subsample_dates()`, `build_frontier_series()`, `load_historical_rf()`, `get_rf_for_date()`, `plot_frontier_dynamics()` |
 
-| Файл | Что проверяет |
-|------|---------------|
-| `tests/test_step1_data.py` | Целостность данных (30 тикеров, сплиты, пропуски) |
-| `tests/test_step2_data.py` | Ковариационные матрицы (PSD, размеры, condition number) |
-| `tests/test_step2_returns.py` | Доходности (shape, NaN, диапазон) |
-| `tests/test_step3.py` | EF (монотонность, GMVP, Sharpe, вложенность) |
-| `tests/test_step3_stage1.py` | Выбор окна и входные данные для EF |
-| `tests/test_step4.py` | Файлы динамики EF |
-| `tests/test_step4_dynamics.py` | Содержимое pickle с динамикой |
-| `tests/test_step5.py` | Beta (значимость, диапазон, adjusted) |
-| `tests/test_step6_phase_a.py` | Sigma_beta (PSD, condition number) |
-| `tests/test_step6_phase_b.py` | EF на beta (монотонность, ключевые портфели) |
-| `tests/test_step6_phase_c.py` | Динамика EF на beta |
+### Excel-файл (data_export.xlsx)
 
-Запуск всех тестов:
+Для тех, кому удобнее работать с Excel. 19 листов:
 
-```bash
-pytest tests/ -v
-```
-
-### Остальное
-
-| Файл | Назначение |
+| Лист | Содержание |
 |------|-----------|
-| `task.txt` | Полный текст задания (25 задач) |
-| `tickers_30.md` | Обоснование выбора 30 тикеров и замен |
-| `requirements.txt` | Зависимости Python |
-| `CLAUDE.md` | Инструкции для AI-помощника (технические решения, стиль) |
-| `step_1.txt` ... `step_6.txt` | Планы выполнения по этапам |
-| `temp/` | Промежуточные графики и логи проверок |
+| spravka | Описание всех листов и полей |
+| instruments | 30 тикеров: компания, сектор |
+| ohlcv | Дневные котировки (82670 строк) |
+| prices_adjusted | Скорректированные цены закрытия |
+| benchmark | Индекс IMOEX |
+| risk_free_rate | Ключевая ставка ЦБ |
+| trading_calendar | Торговый календарь MOEX |
+| corporate_actions | Сплиты и консолидации |
+| returns_daily | Дневные доходности 30 акций |
+| summary_statistics | Описательная статистика доходностей |
+| selected_window | Параметры выбранного окна (252d) |
+| ef_comparison | 4 EF frontiers (800 точек) |
+| ef_key_portfolios | GMVP, tangency, EW для 4 режимов |
+| ef_dynamics_summary | Метрики стабильности EF по методам |
+| ef_dynamics_gmvp | Траектория GMVP по годам |
+| beta_coefficients | Historical и adjusted beta, R2, сектор |
+| beta_statistics | Полная OLS-диагностика (18 показателей) |
+| beta_cov_matrix | Sigma_beta (market model, 30x30) |
+| ef_beta_comparison | Сравнение historical vs beta EF |
 
 ---
 
@@ -525,8 +645,6 @@ pytest tests/ -v
 | ftol | 1e-12 |
 | maxiter | 1000--2000 |
 | Random seed | 42 |
-| Формат хранения | Parquet (long format), CSV для справочников |
-| 3D ковариационные матрицы | pickle (dict: dates, tickers, covs) |
 
 ---
 
@@ -534,40 +652,27 @@ pytest tests/ -v
 
 - **MOEX ISS API** (`iss.moex.com`) -- котировки акций и индекса IMOEX, через библиотеку `apimoex`
 - **ЦБ РФ** (`cbr.ru/DailyInfo.asmx`) -- ключевая ставка (безрисковая ставка)
-- **Finam** (`finam.ru`) -- перекрёстная проверка котировок
 
-Цепочка данных: MOEX ISS API <- Московская биржа <- торги на MOEX <- заявки брокеров. Ключи доступа не требуются.
+Ключи доступа не требуются.
 
 ---
 
 ## Зависимости
 
 ```
-apimoex==1.3.0          # доступ к MOEX ISS API
-requests==2.32.3        # HTTP-запросы
-pandas==2.2.3           # основной инструмент работы с данными
-numpy==1.26.4           # линейная алгебра, матрицы
-matplotlib==3.9.3       # графики
-seaborn==0.13.2         # тепловые карты корреляций
-pyarrow==18.1.0         # чтение/запись Parquet
-openpyxl==3.1.5         # экспорт в Excel
-beautifulsoup4==4.12.3  # парсинг HTML (Finam)
-lxml==5.3.0             # парсинг XML (ЦБ SOAP API)
-pytest==8.3.4           # тестирование
+pandas, numpy, matplotlib, seaborn, scipy, statsmodels, pyarrow, openpyxl
 ```
 
-Также используется `scipy` (входит в стандартную среду Colab/Anaconda) и `statsmodels` (для OLS-регрессий).
+Полный список с версиями -- в `requirements.txt`. Для Colab: `!pip install -r requirements.txt`.
 
 ---
 
 ## Известные особенности данных
 
-1. **Период 02--03.2022 (приостановка торгов на MOEX):** торги были остановлены на несколько недель. Данные за этот период отсутствуют, пропуск остаётся в данных. При расчёте доходностей за границей перерыва получается один аномальный наблюдение -- оно входит в выборку, описано в методологии.
+1. **Период 02--03.2022 (приостановка торгов на MOEX):** торги были остановлены на несколько недель. Пропуск остаётся в данных, описан в методологии.
 
-2. **21-дневное скользящее окно (n/p = 0.7):** ковариационная матрица сингулярна (30 акций, 21 наблюдение). Обязательно использовать Ledoit-Wolf shrinkage.
+2. **CBOM (МКБ):** торги начались 02.07.2015, поэтому общий период всех 30 акций начинается с этой даты (а не с 01.01.2015).
 
-3. **CBOM (МКБ):** торги начались 02.07.2015, поэтому общий период всех 30 акций начинается с этой даты (а не с 01.01.2015).
+3. **Отрицательный Sharpe ratio:** при rf = 16% доходность GMVP ниже безрисковой ставки во всех режимах. Это не ошибка -- это реальная ситуация для российского рынка конца 2025 года с высокой ключевой ставкой.
 
-4. **Отрицательный Sharpe ratio:** при rf = 16% доходность GMVP ниже безрисковой ставки во всех режимах. Это не ошибка -- это реальная ситуация на российском рынке конца 2025 года.
-
-5. **Short_25 frontier:** при визуализации уходит далеко вправо (std до 230%), при построении графиков нужно обрезать ось X.
+4. **Short_25 frontier:** при визуализации уходит далеко вправо (std до 230%), при построении графиков нужно обрезать ось X.
