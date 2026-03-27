@@ -2,7 +2,7 @@
 
 Студенческий проект по курсу "Управление портфелем" (магистратура). Применяем теорию Марковица на реальных данных 30 российских акций с Московской биржи за 2015--2025 годы: строим границы эффективных портфелей при различных ограничениях, считаем бета-коэффициенты по рыночной модели, сравниваем три подхода к оценке ковариационной матрицы (историческая, на основе historical beta, на основе adjusted beta).
 
-Задание содержит 25 задач. Выполнены задачи 1--20 (включая бонусные). Остаются задачи 21--25, инструкции к ним подробно описаны ниже.
+Задание содержит 25 задач. Выполнены задачи 1--22 (включая бонусные). Остаются задачи 23--25, инструкции к ним подробно описаны ниже.
 
 ---
 
@@ -96,7 +96,7 @@ pip install -r requirements.txt
 | 19 | Сравнение трёх подходов (hist, beta, adj) | Выполнено | `data/processed/step8_comparison_static.parquet` |
 | 20* | Сравнение для разных окон | Выполнено | `data/processed/step8_dynamics_comparison.parquet` |
 | 21* | Все пункты со звёздочкой | Выполнено | 2b, 3, 9b, 10, 15, 18, 20 -- все (*) из пп. 2--20 |
-| 22** | Black's two-fund theorem | Не начато | -- |
+| 22** | Black's two-fund theorem | Выполнено | `data/processed/step10_twofund_*.parquet`, `data/processed/step10_analytical_results.pkl` |
 | 23*** | Monte Carlo frontier | Не начато | -- |
 | 24**** | Maximum risk portfolio | Не начато | -- |
 | 25***** | Implementation shortfall | Не начато | -- |
@@ -448,7 +448,7 @@ frontier_lo = build_efficient_frontier(mu, Sigma_adj, rf, n_points=200, bounds=[
 
 **Формулировка из задания:** *Выполнить пункты с (\*), которая встречается в пп. 2-20.*
 
-**Статус:** задачи 2b, 3, 9b, 10, 15 уже выполнены. Для полного зачёта осталось выполнить задачи 18 и 20 (см. выше).
+**Статус:** ВЫПОЛНЕНО. Все (*)-пункты из заданий 2-20 закрыты. Добавлены: 5-дневное скользящее окно с Ledoit-Wolf shrinkage, обоснование невозможности 1-дневного окна, месячный шаг EF dynamics (114 дат), квартальный expanding window (39 дат). Полная таблица аудита — в `data/processed/step9_starred_audit.parquet`.
 
 ---
 
@@ -456,41 +456,21 @@ frontier_lo = build_efficient_frontier(mu, Sigma_adj, rf, n_points=200, bounds=[
 
 **Формулировка из задания:** *Проверить Black's (1972) two-fund theorem, согласно которой все портфели на границе портфелей с минимальной дисперсией являются линейной комбинацией любых двух других портфелей на этой границе при условии, что короткие продажи разрешены.*
 
-**Суть:** математически строгое свойство MVF (minimum variance frontier) для unrestricted case. Берём два «опорных» портфеля -- GMVP и tangency -- и показываем, что любой третий портфель на frontier можно точно выразить через них.
+**Статус:** ВЫПОЛНЕНО. Two-fund theorem проверена численно (SLSQP) и аналитически (Merton 1972 closed-form) на 30 российских акциях.
 
-**Входные файлы:**
-| Файл | Что берём |
-|------|-----------|
-| `data/processed/ef_unrestricted.parquet` | frontier (200 точек: target_return, portfolio_return, portfolio_std) |
-| `data/processed/selected_mu.parquet` | mu (для пересчёта return/std из весов) |
-| `data/processed/selected_cov.parquet` | Sigma (для пересчёта return/std из весов) |
+**Результаты:**
 
-Веса всех 200 портфелей хранятся в `ef_unrestricted_weights.pkl` -> `frontier_weights` (200, 30). GMVP: ключ `gmvp` -> `weights`, tangency: ключ `tangency` -> `weights`. Но этого файла нет в репозитории -- пересчитайте GMVP и tangency из `selected_mu` + `selected_cov` функциями `find_gmvp` и `find_tangency` из ноутбука.
+| Проверка | Точность | Вывод |
+|----------|----------|-------|
+| Численная (GMVP + tangency, 200 портфелей) | max L2 = 1.21e-05 | Теорема подтверждена |
+| 5 пар базисных портфелей | max L2 = 1.33e-05 | Работает для любой пары |
+| Аналитическая (Merton closed-form) | ~8.7e-16 | Математически доказано |
+| Long-only (constrained) | max L2 = 0.24 | Теорема НЕ выполняется |
+| Short <= 25% (constrained) | max L2 = 7.11 | Теорема НЕ выполняется |
 
-**Алгоритм:**
-```python
-w1 = find_gmvp(mu, Sigma)['weights']              # P1 = GMVP
-w2 = find_tangency(mu, Sigma, rf)['weights']       # P2 = Tangency
+Числ. ошибка ~1e-5 обусловлена точностью SLSQP optimizer (не нарушением теоремы). Аналитическое решение Merton подтверждает теорему с точностью до machine epsilon. Для constrained случаев binding constraints на веса нарушают линейную структуру MVF.
 
-# для каждого портфеля P3 на frontier подбираем alpha:
-# w3 = alpha * w1 + (1 - alpha) * w2
-# => alpha = (w3 - w2) / (w1 - w2), по любой компоненте
-# или через least squares: alpha = argmin || w3 - alpha*w1 - (1-alpha)*w2 ||
-
-for i, w3 in enumerate(frontier_weights):
-    # alpha через return:
-    r1 = w1 @ mu; r2 = w2 @ mu; r3 = w3 @ mu
-    if abs(r1 - r2) > 1e-10:
-        alpha = (r3 - r2) / (r1 - r2)
-        w_reconstructed = alpha * w1 + (1 - alpha) * w2
-        error = np.max(np.abs(w3 - w_reconstructed))
-```
-
-**Ожидаемые выводы:**
-- Для unrestricted case: ошибка реконструкции < 1e-3 для всех 200 точек (ограничена только точностью optimizer)
-- Теорема подтверждается: MVF -- линейное подпространство в пространстве весов
-- Для long-only: теорема НЕ выполняется (ограничения нарушают линейность -- покажите это для сравнения)
-- Практический смысл: инвестору достаточно двух ETF (GMVP-like и aggressive) для любой позиции на frontier
+Практический смысл: инвестору в unrestricted режиме достаточно двух «фондов» (например, GMVP и tangency) для синтеза любого портфеля на efficient frontier. При наличии ограничений на веса это не работает
 
 ---
 
